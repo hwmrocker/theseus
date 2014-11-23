@@ -151,12 +151,12 @@ class Pathfinder:
             if info[0] > max_depth:
                 break
             _score = score(*info)
-            print(" s{}: {}".format(_score, info))
+            # print(" s{}: {}".format(_score, info))
             if _score > best_score:
                 best_score = _score
                 best_info = info
-                print ("new highscore")
-            print("  s{} {}".format(best_score, best_info))
+                # print ("new highscore")
+            # print("  s{} {}".format(best_score, best_info))
 
         print("ret s{} {}".format(best_score, best_info))
         return best_info
@@ -215,7 +215,7 @@ class HWM(NetworkClient):
     def __init__(self, *args, **kw):
         super().__init__(*args, **kw)
         self.map = []
-        self.ignore_list = []
+        self._ignore_list = []  # ignores unknown callbacks
 
     def inform(self, msg_type, data):
         try:
@@ -224,46 +224,71 @@ class HWM(NetworkClient):
             print("{}: {}".format(msg_type, ret))
 
         except AttributeError:
-            if msg_type not in self.ignore_list:
-                self.ignore_list.append(msg_type)
+            if msg_type not in self._ignore_list:
+                self._ignore_list.append(msg_type)
                 print("No handler for {}".format(msg_type))
 
     def handle_MAP(self, mapstr):
         self.map = []
         for line in mapstr.splitlines():
             self.map.append([c for c in line])
-        print(mapstr)
+        # print(mapstr)
 
     def handle_WHOAMI(self, data):
         self.position = (round(data[3] / 10), round(data[2] / 10))
         print("WHOAMI: {}, {}".format(self.position, repr(data)))
 
+    @asyncio.coroutine
+    def walk(self, path):
+        print("walk {}".format(path))
+        # for direction in path:
+        #     self.send_msg(dict(type="move", direction=direction, distance=1))
+        #     yield from asyncio.sleep(0.15)
+        # return
+        if not path:
+            return
+        d = path[0]
+        counter = 1
+        for newd in path[1:]:
+            if d == newd:
+                counter += 1
+                continue
+            self.send_msg(dict(type="move", direction=d, distance=counter))
+            yield from asyncio.sleep((0.15 * counter) + 0.05)
+            d = newd
+            counter = 1
+        else:
+            self.send_msg(dict(type="move", direction=d, distance=counter))
+            yield from asyncio.sleep((0.15 * counter) + 0.05)
 
-@asyncio.coroutine
-def main_loop(client):
+    @asyncio.coroutine
+    def ai_loop(self):
+        yield from asyncio.sleep(0.5)
 
-    yield from asyncio.sleep(1)
-    while True:
+        while True:
 
-        client.send_msg(dict(type="whoami"))
-        client.send_msg(dict(type="map"))
-        yield from asyncio.sleep(2)
+            self.send_msg(dict(type="whoami"))
+            self.send_msg(dict(type="map"))
+            yield from asyncio.sleep(2)
 
-        info = client.get_best_move()
-        path = info[3]
-        hide_path = info[6]
-        print("go, {} b {}".format(path, hide_path))
-        for direction in path:
-            client.send_msg(dict(type="move", direction=direction, distance=1))
-            yield from asyncio.sleep(0.15)
-        print(hide_path)
-        fuse_time = len(hide_path) * 0.2 + 0.1
-        client.send_msg(dict(type="bomb", fuse_time=fuse_time))
-        for direction in hide_path:
-            client.send_msg(dict(type="move", direction=direction, distance=1))
-            yield from asyncio.sleep(0.15)
+            info = self.get_best_move()
+            path = info[3]
+            hide_path = info[6]
+            print("go, {} b {}".format(path, hide_path))
+            # for direction in path:
+            #     self.send_msg(dict(type="move", direction=direction, distance=1))
+            #     yield from asyncio.sleep(0.15)
+            yield from self.walk(path)
+            print(hide_path)
+            fuse_time = len(hide_path) * 0.2 + 0.1
+            self.send_msg(dict(type="bomb", fuse_time=fuse_time))
+            yield from self.walk(hide_path)
 
-        yield from asyncio.sleep(len(hide_path)*0.05 + 0.1 + 2 + 2)
+            # for direction in hide_path:
+            #     self.send_msg(dict(type="move", direction=direction, distance=1))
+            #     yield from asyncio.sleep(0.15)
+
+            yield from asyncio.sleep(len(hide_path)*0.05 + 0.1 + 2)
 
 
 if __name__ == "__main__":
@@ -271,6 +296,6 @@ if __name__ == "__main__":
     asyncio.async(c.connect())
     loop = asyncio.get_event_loop()
     try:
-        loop.run_until_complete(main_loop(c))
+        loop.run_until_complete(c.ai_loop())
     finally:
         loop.close()
