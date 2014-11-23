@@ -216,6 +216,7 @@ class HWM(NetworkClient):
         super().__init__(*args, **kw)
         self.map = []
         self._ignore_list = []  # ignores unknown callbacks
+        self.known_bombs = []
 
     def inform(self, msg_type, data):
         try:
@@ -241,25 +242,32 @@ class HWM(NetworkClient):
     @asyncio.coroutine
     def walk(self, path):
         print("walk {}".format(path))
-        # for direction in path:
-        #     self.send_msg(dict(type="move", direction=direction, distance=1))
-        #     yield from asyncio.sleep(0.15)
-        # return
         if not path:
             return
-        d = path[0]
-        counter = 1
-        for newd in path[1:]:
-            if d == newd:
-                counter += 1
+        direction = path[0]
+        distance = 1
+        for new_direction in path[1:]:
+            if direction == new_direction:
+                distance += 1
                 continue
-            self.send_msg(dict(type="move", direction=d, distance=counter))
-            yield from asyncio.sleep((0.15 * counter) + 0.05)
-            d = newd
-            counter = 1
+            yield from self._walk(direction, distance)
+            direction = new_direction
+            distance = 1
         else:
-            self.send_msg(dict(type="move", direction=d, distance=counter))
-            yield from asyncio.sleep((0.15 * counter) + 0.05)
+            yield from self._walk(direction, distance)
+
+    @asyncio.coroutine
+    def _walk(self, direction, distance):
+        x, y = self.position
+        dx, dy = directions[direction]
+        new_position = (x + distance * dx, y + distance * dy)
+        # TODO: check if it is safe to proceed
+        self.send_msg(dict(type="move", direction=direction, distance=distance))
+        yield from asyncio.sleep((0.15 * distance) + 0.05)
+        self.position = new_position
+
+    def bomb(self, fuse_time):
+        self.send_msg(dict(type="bomb", fuse_time=fuse_time))
 
     @asyncio.coroutine
     def ai_loop(self):
@@ -275,18 +283,11 @@ class HWM(NetworkClient):
             path = info[3]
             hide_path = info[6]
             print("go, {} b {}".format(path, hide_path))
-            # for direction in path:
-            #     self.send_msg(dict(type="move", direction=direction, distance=1))
-            #     yield from asyncio.sleep(0.15)
             yield from self.walk(path)
             print(hide_path)
             fuse_time = len(hide_path) * 0.2 + 0.1
-            self.send_msg(dict(type="bomb", fuse_time=fuse_time))
+            self.bomb(fuse_time)
             yield from self.walk(hide_path)
-
-            # for direction in hide_path:
-            #     self.send_msg(dict(type="move", direction=direction, distance=1))
-            #     yield from asyncio.sleep(0.15)
 
             yield from asyncio.sleep(len(hide_path)*0.05 + 0.1 + 2)
 
