@@ -257,7 +257,7 @@ class HWM(NetworkClient):
         self.map_data_consistent = False
         self.position_data_consistent = False
         self.ai_running = False
-        loop.call_later(1, self._del_bombs)
+        loop.call_later(1, self.update_bombs)
 
     @property
     def known_bombs(self):
@@ -271,7 +271,8 @@ class HWM(NetworkClient):
         for b in self._known_bombs:
             found_match = False
             for _b in value:
-                if b.position == _b.position and (b.fuse_time - 1) < _b.fuse_time:
+                # TODO check this condition again
+                if b.position == _b.position and (b.fuse_time - 1) < _b.fuse_time < (b.fuse_time + 1):
                     found_match = True
                     break
             if not found_match:
@@ -311,6 +312,20 @@ class HWM(NetworkClient):
         self.position_data_consistent = True
         asyncio.async(self.update_ai())
 
+    def handle_WHAT_BOMBS(self, data):
+        logger.debug(data)
+        timed = now()
+        new_bombs = []
+        for pos, fuse_time, state in data:
+            if state == "ticking":
+                fuse_time = fuse_time + timed
+            elif state == "burning":
+                fuse_time = fuse_time + timed - 1.5
+            else:
+                fuse_time = fuse_time + timed - 1.7
+            new_bombs.append(Bomb(pos, fuse_time))
+        self.known_bombs = new_bombs
+
     @asyncio.coroutine
     def walk(self, path):
         logger.debug("walk {}".format(path))
@@ -343,11 +358,12 @@ class HWM(NetworkClient):
         self.known_bombs.append(Bomb(self.position, now()+fuse_time))
         loop = asyncio.get_event_loop()
 
-    def _del_bombs(self, delta=2):
-        now2 = now() - 2
-        logger.info("_del_bombs: {} {}".format(now2, self.known_bombs))
-        self.known_bombs = [b for b in self.known_bombs if b.fuse_time > now2]
-        loop.call_later(1, self._del_bombs)
+    def update_bombs(self, delta=2):
+        # now2 = now() - 2
+        # logger.info("update_bombs: {} {}".format(now2, self.known_bombs))
+        # self.known_bombs = [b for b in self.known_bombs if b.fuse_time > now2]
+        self.send_msg(dict(type="what_bombs"))
+        loop.call_later(0.25, self.update_bombs)
 
     def connection_established(self):
         self.send_msg(dict(type="connect", username="hwm"))
