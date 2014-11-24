@@ -390,6 +390,7 @@ class HWM(NetworkClient):
                 # yield from asyncio.sleep(len(hide_path)*0.05 + 0.1 + 2)
             finally:
                 self.ai_running = False
+                yield from asyncio.sleep(0.5)
                 asyncio.async(self.update_ai())
 
 
