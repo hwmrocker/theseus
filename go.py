@@ -14,7 +14,7 @@ fh = logging.FileHandler('debug.log')
 fh.setLevel(logging.DEBUG)
 # create console handler with a higher log level
 ch = logging.StreamHandler()
-ch.setLevel(logging.DEBUG)
+ch.setLevel(logging.ERROR)
 # create formatter and add it to the handlers
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 fh.setFormatter(formatter)
@@ -118,13 +118,20 @@ class Pathfinder:
                 break
         return distance, path
 
-    def _is_safe(self, pos, info=None, additional_bombs=None, distance=10):
+    def _is_safe(self, pos, time_info=None, additional_bombs=None, distance=10):
         bombs = self.known_bombs[:]
         if additional_bombs is not None:
             # additional_bombs = []
             bombs += additional_bombs
         danger_zone = []
         for (x, y), fuse_time in bombs:
+            if time_info:
+                right_now = now()
+                from_time, to_time = time_info
+                from_time += right_now
+                to_time += right_now
+                if (to_time < (fuse_time - 0.2)) or ((fuse_time + 2) < from_time):
+                    continue
             if (x, y) == pos:
                 return False
             for direction, (dx, dy) in directions.items():
@@ -156,7 +163,7 @@ class Pathfinder:
             pos, info = to_visit.pop(0)
             x, y = pos
             visited.add(pos)
-            if not self._is_safe(pos, info):
+            if not self._is_safe(pos, (info[1], info[2])):
                 continue
             yield pos, info
 
@@ -267,7 +274,7 @@ class HWM(NetworkClient):
     def known_bombs(self, value):
         # if there is a bomb missing or fuse_time more than a second later
         # we need to check the mapdata again
-        logger.debug("old {} | new {}".format(self._known_bombs, value))
+        logger.error("old {} | new {}".format(self._known_bombs, value))
         for b in self._known_bombs:
             found_match = False
             for _b in value:
@@ -313,18 +320,21 @@ class HWM(NetworkClient):
         asyncio.async(self.update_ai())
 
     def handle_WHAT_BOMBS(self, data):
-        logger.debug(data)
         timed = now()
         new_bombs = []
         for pos, fuse_time, state in data:
+            logger.error(data)
             if state == "ticking":
                 fuse_time = fuse_time + timed
             elif state == "burning":
-                fuse_time = fuse_time + timed - 1.5
-            else:
                 fuse_time = fuse_time + timed - 1.7
+            else:
+                fuse_time = fuse_time + timed - 0.2
             new_bombs.append(Bomb(pos, fuse_time))
         self.known_bombs = new_bombs
+
+    def handle_ERR(self, data):
+        logger.error(data)
 
     @asyncio.coroutine
     def walk(self, path):
@@ -344,14 +354,34 @@ class HWM(NetworkClient):
             yield from self._walk(direction, distance)
 
     @asyncio.coroutine
-    def _walk(self, direction, distance):
+    def _walk(self, direction, distance, timeout=5):
         x, y = self.position
         dx, dy = directions[direction]
+        safe_distance = None
         new_position = (x + distance * dx, y + distance * dy)
-        # TODO: check if it is safe to proceed
-        self.send_msg(dict(type="move", direction=direction, distance=distance))
-        yield from asyncio.sleep((0.15 * distance) + 0.05)
-        self.position = new_position
+        logger.debug("walk ... {} {}".format(direction, distance))
+        while distance > 0:
+            for i in range(distance + 1):
+                _new_position = (x + i * dx, y + i * dy)
+                if (not self._is_safe(new_position, time_info=(0.1 * i, 0.1 * i + 0.1))):
+                    break
+                safe_distance = i
+                new_position = _new_position
+                logger.debug("new safe position {}".format(new_position))
+            logger.debug(" safe_distance {}".format(safe_distance))
+            if safe_distance is None:
+                raise Exception("Oh no")
+            if safe_distance > 0:
+                self.send_msg(dict(type="move", direction=direction, distance=safe_distance))
+                yield from asyncio.sleep((0.15 * distance) + 0.05)
+                self.position = new_position
+                distance -= safe_distance
+            else:
+                if timeout > 0:
+                    timeout -= 0.5
+                    yield from asyncio.sleep(0.5)
+                else:
+                    raise Exception("Oh no block")
 
     def bomb(self, fuse_time):
         self.send_msg(dict(type="bomb", fuse_time=fuse_time))
@@ -384,7 +414,7 @@ class HWM(NetworkClient):
                 logger.debug("go, {} b {}".format(path, hide_path))
                 yield from self.walk(path)
                 logger.debug(hide_path)
-                fuse_time = len(hide_path) * 0.2 + 0.1
+                fuse_time = len(hide_path) * 0.2 + 0.3
                 self.bomb(fuse_time)
                 yield from self.walk(hide_path)
                 # yield from asyncio.sleep(len(hide_path)*0.05 + 0.1 + 2)
@@ -392,7 +422,6 @@ class HWM(NetworkClient):
                 self.ai_running = False
                 yield from asyncio.sleep(0.5)
                 asyncio.async(self.update_ai())
-
 
     def update_internal_state(self):
         self.send_msg(dict(type="whoami"))
