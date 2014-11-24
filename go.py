@@ -1,14 +1,47 @@
 import asyncio
 import msgpack
+import time
+import sys
+from collections import namedtuple
+
+import logging
+
+# create logger with 'spam_application'
+logger = logging.getLogger('Theseus')
+logger.setLevel(logging.DEBUG)
+# create file handler which logs even debug messages
+fh = logging.FileHandler('debug.log')
+fh.setLevel(logging.DEBUG)
+# create console handler with a higher log level
+ch = logging.StreamHandler()
+ch.setLevel(logging.DEBUG)
+# create formatter and add it to the handlers
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+fh.setFormatter(formatter)
+ch.setFormatter(formatter)
+# add the handlers to the logger
+logger.addHandler(fh)
+logger.addHandler(ch)
 
 
 directions = {
-# direction: (left, top)
+    # direction: (left, top)
     "w": (0, -1),
     "a": (-1, 0),
     "s": (0, 1),
     "d": (1, 0),
 }
+
+
+def now():
+    return time.time()
+
+
+_Bomb = namedtuple("Bomb", ["position", "fuse_time"])
+
+
+class Bomb(_Bomb):
+    pass
 
 
 class Pathfinder:
@@ -151,14 +184,14 @@ class Pathfinder:
             if info[0] > max_depth:
                 break
             _score = score(*info)
-            # print(" s{}: {}".format(_score, info))
+            # logger.debug(" s{}: {}".format(_score, info))
             if _score > best_score:
                 best_score = _score
                 best_info = info
-                # print ("new highscore")
-            # print("  s{} {}".format(best_score, best_info))
+                # logger.debug("new highscore")
+            # logger.debug("  s{} {}".format(best_score, best_info))
 
-        print("ret s{} {}".format(best_score, best_info))
+        logger.debug("ret s{} {}".format(best_score, best_info))
         return best_info
 
 
@@ -176,7 +209,7 @@ class NetworkClient(Pathfinder):
         self.writer = None
 
     def send_msg(self, msg):
-        print("send: {}".format(msg))
+        logger.debug("send: {}".format(msg))
         pack = msgpack.packb(msg)
         self.writer.write(pack)
 
@@ -185,17 +218,17 @@ class NetworkClient(Pathfinder):
             self.writer.write_eof()
 
     def inform(self, *msg):
-        print(msg)
+        logger.debug(msg)
 
     @asyncio.coroutine
     def connect(self):
-        print('Connecting...')
+        logger.debug('Connecting...')
         try:
             reader, writer = yield from asyncio.open_connection(self.host, self.port)
             # asyncio.async(self.create_input())
             self.reader = reader
             self.writer = writer
-            self.send_msg(dict(type="connect", username="hwm"))
+            self.connection_established()
             self.sockname = writer.get_extra_info('sockname')
             unpacker = msgpack.Unpacker(encoding='utf-8')
             while not reader.at_eof():
@@ -203,10 +236,10 @@ class NetworkClient(Pathfinder):
                 unpacker.feed(pack)
                 for msg in unpacker:
                     self.inform(*msg)
-            print('The server closed the connection')
+            logger.debug('The server closed the connection')
             self.writer = None
         except ConnectionRefusedError as e:
-            print('Connection refused: {}'.format(e))
+            logger.debug('Connection refused: {}'.format(e))
             self.close()
 
 
@@ -216,32 +249,66 @@ class HWM(NetworkClient):
         super().__init__(*args, **kw)
         self.map = []
         self._ignore_list = []  # ignores unknown callbacks
-        self.known_bombs = []
+        self._known_bombs = []
+        self.map_data_consistent = False
+        self.position_data_consistent = False
+        loop.call_later(1, self._del_bombs)
+
+    @property
+    def known_bombs(self):
+        return self._known_bombs
+
+    @known_bombs.setter
+    def known_bombs(self, value):
+        # if there is a bomb missing or fuse_time more than a second later
+        # we need to check the mapdata again
+        logger.debug("old {} | new {}".format(self._known_bombs, value))
+        for b in self._known_bombs:
+            found_match = False
+            for _b in value:
+                if b.position == _b.position and (b.fuse_time - 1) < _b.fuse_time:
+                    found_match = True
+                    break
+            if not found_match:
+                self.map_data_consistent = False
+                # TODO ask for mapupdate
+                # asyncio.async()
+                loop.call_soon(self.update_internal_state)
+                break
+        self._known_bombs = value
+
+    @property
+    def data_consitent(self):
+        return self.map_data_consistent and self.position_data_consistent
 
     def inform(self, msg_type, data):
         try:
             handler = getattr(self, "handle_{}".format(msg_type))
             ret = handler(data)
-            print("{}: {}".format(msg_type, ret))
+            logger.debug("{}: {}".format(msg_type, ret))
 
         except AttributeError:
             if msg_type not in self._ignore_list:
                 self._ignore_list.append(msg_type)
-                print("No handler for {}".format(msg_type))
+                logger.debug("No handler for {}".format(msg_type))
 
     def handle_MAP(self, mapstr):
         self.map = []
         for line in mapstr.splitlines():
             self.map.append([c for c in line])
-        # print(mapstr)
+        # logger.debug(mapstr)
+        self.map_data_consistent = True
+        asyncio.async(self.update_ai())
 
     def handle_WHOAMI(self, data):
         self.position = (round(data[3] / 10), round(data[2] / 10))
-        print("WHOAMI: {}, {}".format(self.position, repr(data)))
+        logger.debug("WHOAMI: {}, {}".format(self.position, repr(data)))
+        self.position_data_consistent = True
+        asyncio.async(self.update_ai())
 
     @asyncio.coroutine
     def walk(self, path):
-        print("walk {}".format(path))
+        logger.debug("walk {}".format(path))
         if not path:
             return
         direction = path[0]
@@ -268,35 +335,55 @@ class HWM(NetworkClient):
 
     def bomb(self, fuse_time):
         self.send_msg(dict(type="bomb", fuse_time=fuse_time))
+        self.known_bombs.append(Bomb(self.position, now()+fuse_time))
+        loop = asyncio.get_event_loop()
+
+    def _del_bombs(self, delta=2):
+        now2 = now() - 2
+        self.known_bombs = [b for b in self.known_bombs if b.fuse_time > now2]
+        loop.call_later(1, self._del_bombs)
+
+    def connection_established(self):
+        self.send_msg(dict(type="connect", username="hwm"))
+        self.send_msg(dict(type="whoami"))
+        self.send_msg(dict(type="map"))
 
     @asyncio.coroutine
-    def ai_loop(self):
-        yield from asyncio.sleep(0.5)
-
-        while True:
-
-            self.send_msg(dict(type="whoami"))
-            self.send_msg(dict(type="map"))
-            yield from asyncio.sleep(2)
-
+    def update_ai(self):
+        logger.debug("update ai")
+        logger.debug("self.data_consitent: {}, m{}, p{}".format(self.data_consitent, self.map_data_consistent, self.position_data_consistent))
+        if self.data_consitent:
             info = self.get_best_move()
             path = info[3]
             hide_path = info[6]
-            print("go, {} b {}".format(path, hide_path))
+            logger.debug("go, {} b {}".format(path, hide_path))
             yield from self.walk(path)
-            print(hide_path)
+            logger.debug(hide_path)
             fuse_time = len(hide_path) * 0.2 + 0.1
             self.bomb(fuse_time)
             yield from self.walk(hide_path)
 
             yield from asyncio.sleep(len(hide_path)*0.05 + 0.1 + 2)
 
+    def update_internal_state(self):
+        self.send_msg(dict(type="whoami"))
+        self.send_msg(dict(type="map"))
+        # yield from asyncio.sleep(2)
+
+    @asyncio.coroutine
+    def state_walking(self):
+        pass
+
+    def read_stdin(self):
+        logger.debug("IN {}".format(repr(sys.stdin.readline())))
+
 
 if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
     c = HWM()
     asyncio.async(c.connect())
-    loop = asyncio.get_event_loop()
+    loop.add_reader(sys.stdin, c.read_stdin)
     try:
-        loop.run_until_complete(c.ai_loop())
+        loop.run_forever()
     finally:
         loop.close()
