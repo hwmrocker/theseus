@@ -112,17 +112,19 @@ class Pathfinder:
         distance = 100000
         path = []
         for npos, info in nb_tiles:
-            if self._is_safe(npos, additional_bombs=[pos]):
+            if self._is_safe(npos, additional_bombs=[Bomb(pos, now())]):
                 distance = info[0]
                 path = info[3][:]
                 break
         return distance, path
 
-    def _is_safe(self, pos, additional_bombs=None, distance=10):
-        if additional_bombs is None:
-            additional_bombs = []
+    def _is_safe(self, pos, info=None, additional_bombs=None, distance=10):
+        bombs = self.known_bombs[:]
+        if additional_bombs is not None:
+            # additional_bombs = []
+            bombs += additional_bombs
         danger_zone = []
-        for x, y in additional_bombs:
+        for (x, y), fuse_time in bombs:
             if (x, y) == pos:
                 return False
             for direction, (dx, dy) in directions.items():
@@ -154,6 +156,8 @@ class Pathfinder:
             pos, info = to_visit.pop(0)
             x, y = pos
             visited.add(pos)
+            if not self._is_safe(pos, info):
+                continue
             yield pos, info
 
             for direction, (dx, dy) in directions.items():
@@ -252,6 +256,7 @@ class HWM(NetworkClient):
         self._known_bombs = []
         self.map_data_consistent = False
         self.position_data_consistent = False
+        self.ai_running = False
         loop.call_later(1, self._del_bombs)
 
     @property
@@ -340,6 +345,7 @@ class HWM(NetworkClient):
 
     def _del_bombs(self, delta=2):
         now2 = now() - 2
+        logger.info("_del_bombs: {} {}".format(now2, self.known_bombs))
         self.known_bombs = [b for b in self.known_bombs if b.fuse_time > now2]
         loop.call_later(1, self._del_bombs)
 
@@ -351,19 +357,25 @@ class HWM(NetworkClient):
     @asyncio.coroutine
     def update_ai(self):
         logger.debug("update ai")
-        logger.debug("self.data_consitent: {}, m{}, p{}".format(self.data_consitent, self.map_data_consistent, self.position_data_consistent))
-        if self.data_consitent:
-            info = self.get_best_move()
-            path = info[3]
-            hide_path = info[6]
-            logger.debug("go, {} b {}".format(path, hide_path))
-            yield from self.walk(path)
-            logger.debug(hide_path)
-            fuse_time = len(hide_path) * 0.2 + 0.1
-            self.bomb(fuse_time)
-            yield from self.walk(hide_path)
+        if self.data_consitent and not self.ai_running:
+            self.ai_running = True
+            try:
+                info = self.get_best_move()
+                path = info[3]
+                hide_path = info[6]
+                if not hide_path:
+                    return
+                logger.debug("go, {} b {}".format(path, hide_path))
+                yield from self.walk(path)
+                logger.debug(hide_path)
+                fuse_time = len(hide_path) * 0.2 + 0.1
+                self.bomb(fuse_time)
+                yield from self.walk(hide_path)
+                # yield from asyncio.sleep(len(hide_path)*0.05 + 0.1 + 2)
+            finally:
+                self.ai_running = False
+                asyncio.async(self.update_ai())
 
-            yield from asyncio.sleep(len(hide_path)*0.05 + 0.1 + 2)
 
     def update_internal_state(self):
         self.send_msg(dict(type="whoami"))
