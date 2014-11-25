@@ -304,6 +304,7 @@ class HWM(NetworkClient):
         self.map_data_consistent = False
         self.position_data_consistent = False
         self.ai_running = False
+        self.alive = False
         loop.call_later(1, self.update_bombs)
 
     @property
@@ -335,6 +336,8 @@ class HWM(NetworkClient):
         return self.map_data_consistent and self.position_data_consistent
 
     def inform(self, msg_type, data):
+        if msg_type != "ERR":
+            self.alive = True
         try:
             handler = getattr(self, "handle_{}".format(msg_type))
             ret = handler(data)
@@ -374,6 +377,8 @@ class HWM(NetworkClient):
 
     def handle_ERR(self, data):
         logger.error(data)
+        if data == "you are dead":
+            self.alive = False
 
     @asyncio.coroutine
     def walk(self, path):
@@ -439,7 +444,7 @@ class HWM(NetworkClient):
     @asyncio.coroutine
     def update_ai(self):
         logger.debug("update ai")
-        if self.data_consitent and not self.ai_running:
+        if self.data_consitent and self.alive and not self.ai_running:
             self.ai_running = True
             try:
                 info = self.get_best_move()
