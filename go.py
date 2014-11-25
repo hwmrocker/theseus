@@ -41,7 +41,50 @@ _Bomb = namedtuple("Bomb", ["position", "fuse_time"])
 
 
 class Bomb(_Bomb):
-    pass
+
+    # def __init__(self, *args, **kw):
+    #     super().__init__(*args, **kw)
+    need_update = True
+    distance = 10
+
+    def is_safe(self, pos, time_info, world):
+        if time_info:
+            from_time, to_time = time_info
+            if (to_time < (self.fuse_time - 0.2)) or ((self.fuse_time + 2) < from_time):
+                return True
+        if self.need_update:
+            self.update(world)
+        if self.position == pos:
+            return False
+        for direction, danger_zone in self.danger_zones.items():
+            if pos in danger_zone:
+                return False
+        return True
+
+    def update(self, world):
+        self.danger_zones = {
+            "w": [],
+            "a": [],
+            "s": [],
+            "d": [],
+        }
+        x, y = self.position
+        for direction, (dx, dy) in directions.items():
+            for i in range(1, self.distance + 1):
+                nx = x + i * dx
+                ny = y + i * dy
+                npos = (nx, ny)
+                if not world.valid_map_pos(npos):
+                    break
+
+                tile = world.get_tile(npos)
+                if tile == "W":
+                    break
+                elif tile == "M":
+                    break
+                self.danger_zones[direction].append(npos)
+        self.need_update = False
+        # logger.error(self.danger_zones)
 
 
 class Pathfinder:
@@ -60,12 +103,12 @@ class Pathfinder:
 
     def get_tile(self, pos):
         x, y = pos
-        assert self.valid_map_pos(pos)
         return self.map[y][x]
 
     def valid_map_pos(self, pos):
         x, y = pos
-        return 0 <= y < len(self.map) and 0 <= x < len(self.map[y])
+        return 0 <= y < 49 and 0 <= x < 49
+        # return 0 <= y < len(self.map) and 0 <= x < len(self.map[y])
 
     def get_tile_info(self, info):
         (nd, nmint, nmaxt, path, pos) = info
@@ -110,8 +153,9 @@ class Pathfinder:
         nb_tiles = self.get_neighbour_tiles(walkable=True, start_position=pos)
         distance = 100000
         path = []
+        new_bomb = Bomb(pos, now())
         for npos, info in nb_tiles:
-            if self._is_safe(npos, additional_bombs=[Bomb(pos, now())]):
+            if self._is_safe(npos, additional_bombs=[new_bomb]):
                 distance = info[0]
                 path = info[3][:]
                 yield distance, path, npos
@@ -119,38 +163,20 @@ class Pathfinder:
                 if max_tiles == 0:
                     break
 
-    def _is_safe(self, pos, time_info=None, additional_bombs=None, distance=10):
+    def _is_safe(self, pos, time_info=None, additional_bombs=None):
         bombs = self.known_bombs[:]
         if additional_bombs is not None:
-            # additional_bombs = []
             bombs += additional_bombs
-        danger_zone = []
-        for (x, y), fuse_time in bombs:
-            if time_info:
-                right_now = now()
-                from_time, to_time = time_info
-                from_time += right_now
-                to_time += right_now
-                if (to_time < (fuse_time - 0.2)) or ((fuse_time + 2) < from_time):
-                    continue
-            if (x, y) == pos:
-                return False
-            for direction, (dx, dy) in directions.items():
-                for i in range(1, distance + 1):
-                    nx = x + i * dx
-                    ny = y + i * dy
-                    npos = (nx, ny)
-                    if not self.valid_map_pos(npos):
-                        break
+        if time_info:
+            right_now = now()
+            from_time, to_time = time_info
+            from_time += right_now
+            to_time += right_now
+            time_info = from_time, to_time
 
-                    tile = self.get_tile(npos)
-                    if tile == "W":
-                        break
-                    elif tile == "M":
-                        break
-                    danger_zone.append(npos)
-                    if pos == npos:
-                        return False
+        for bomb in bombs:
+            if not bomb.is_safe(pos, time_info, world=self):
+                return False
         return True
 
     def get_neighbour_tiles(self, walkable=False, start_position=None, additional_bombs=None):
@@ -201,7 +227,6 @@ class Pathfinder:
 
     def get_best_move(self, max_depth=15):
         def score(distance, mint, maxt, path, bombpos, score, hide_distance, hide_path, endpos):
-            # score, hide_distance, hide_path, endpos = self.get_tile_info((distance, mint, maxt, path, bombpos))
             if hide_path:
                 return (score * 10) - maxt - (hide_distance * 0.2) + self._score_endpos(endpos, bombpos)
             return (score * 10) - maxt - (hide_distance * 0.2) - 100000
@@ -214,12 +239,9 @@ class Pathfinder:
             if info[0] > max_depth:
                 break
             _score = score(*info)
-            # logger.debug(" s{}: {}".format(_score, info))
             if _score > best_score:
                 best_score = _score
                 best_info = info
-                # logger.debug("new highscore")
-            # logger.debug("  s{} {}".format(best_score, best_info))
 
         logger.debug("ret s{} {}".format(best_score, best_info))
         return best_info
@@ -255,7 +277,6 @@ class NetworkClient(Pathfinder):
         logger.debug('Connecting...')
         try:
             reader, writer = yield from asyncio.open_connection(self.host, self.port)
-            # asyncio.async(self.create_input())
             self.reader = reader
             self.writer = writer
             self.connection_established()
@@ -303,9 +324,9 @@ class HWM(NetworkClient):
                     break
             if not found_match:
                 self.map_data_consistent = False
-                # TODO ask for mapupdate
-                # asyncio.async()
                 loop.call_soon(self.update_internal_state)
+                for b in value:
+                    b.need_update = True
                 break
         self._known_bombs = value
 
@@ -328,7 +349,6 @@ class HWM(NetworkClient):
         self.map = []
         for line in mapstr.splitlines():
             self.map.append([c for c in line])
-        # logger.debug(mapstr)
         self.map_data_consistent = True
         asyncio.async(self.update_ai())
 
@@ -380,7 +400,7 @@ class HWM(NetworkClient):
         new_position = (x + distance * dx, y + distance * dy)
         logger.debug("walk ... {} {}".format(direction, distance))
         while distance > 0:
-            for i in range(distance + 1):
+            for i in range(1, distance + 1):
                 _new_position = (x + i * dx, y + i * dy)
                 if (not self._is_safe(new_position, time_info=(0.1 * i, 0.1 * i + 0.1))):
                     break
@@ -408,9 +428,6 @@ class HWM(NetworkClient):
         loop = asyncio.get_event_loop()
 
     def update_bombs(self, delta=2):
-        # now2 = now() - 2
-        # logger.info("update_bombs: {} {}".format(now2, self.known_bombs))
-        # self.known_bombs = [b for b in self.known_bombs if b.fuse_time > now2]
         self.send_msg(dict(type="what_bombs"))
         loop.call_later(0.25, self.update_bombs)
 
@@ -433,7 +450,7 @@ class HWM(NetworkClient):
                 logger.debug("go, {} b {}".format(path, hide_path))
                 yield from self.walk(path)
                 logger.debug(hide_path)
-                fuse_time = len(hide_path) * 0.2 + 0.3
+                fuse_time = len(hide_path) * 0.2 + 0.3 + 0.5
                 self.bomb(fuse_time)
                 yield from self.walk(hide_path)
                 # yield from asyncio.sleep(len(hide_path)*0.05 + 0.1 + 2)
