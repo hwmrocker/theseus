@@ -50,7 +50,7 @@ class Bomb(_Bomb):
     def is_safe(self, pos, time_info, world):
         if time_info:
             from_time, to_time = time_info
-            if (to_time < (self.fuse_time - 0.2)) or ((self.fuse_time + 2) < from_time):
+            if (to_time < (self.fuse_time - 0.3)) or ((self.fuse_time + 2) < from_time):
                 return True
         if self.need_update:
             self.update(world)
@@ -179,7 +179,7 @@ class Pathfinder:
                 return False
         return True
 
-    def get_neighbour_tiles(self, walkable=False, start_position=None, additional_bombs=None):
+    def get_neighbour_tiles(self, walkable=False, start_position=None, additional_bombs=None, extra_time=0):
         if start_position is None:
             start_position = self.position
         visited = set([])
@@ -188,7 +188,7 @@ class Pathfinder:
             pos, info = to_visit.pop(0)
             x, y = pos
             visited.add(pos)
-            if not self._is_safe(pos, (info[1], info[2]), additional_bombs=additional_bombs):
+            if not self._is_safe(pos, (info[1], info[2] + extra_time), additional_bombs=additional_bombs):
                 continue
             yield pos, info
 
@@ -218,17 +218,20 @@ class Pathfinder:
         for pos, info in self.get_neighbour_tiles(
                 start_position=endpos,
                 walkable=True,
-                additional_bombs=additional_bombs
+                additional_bombs=additional_bombs,
+                extra_time=2
                 ):
             if info[0] > max_depth:
                 break
             bombscore += self._get_bomb_score(pos)
-        return bombscore
+        x, y = endpos
+        return bombscore + self.heatmap[y][x]
 
     def get_best_move(self, max_depth=15):
         def score(distance, mint, maxt, path, bombpos, score, hide_distance, hide_path, endpos):
             if hide_path:
-                return (score * 10) - maxt - (hide_distance * 0.2) + self._score_endpos(endpos, bombpos)
+                bonus = 1000 if score > 0 else 0
+                return ((score * 10) - maxt - (hide_distance * 3)) * 100 + self._score_endpos(endpos, bombpos) + bonus
             return (score * 10) - maxt - (hide_distance * 0.2) - 100000
 
         paths = self.get_bomb_and_hide_paths()
@@ -352,8 +355,20 @@ class HWM(NetworkClient):
         self.map = []
         for line in mapstr.splitlines():
             self.map.append([c for c in line])
+
         self.map_data_consistent = True
+        asyncio.async(self.generate_heatmap())
         asyncio.async(self.update_ai())
+
+    def generate_heatmap(self):
+        self.heatmap = [[0] * 49] * 49
+        for y, line in enumerate(self.map):
+            for x, tile in enumerate(line):
+                if tile == "W":
+                    for _y, _line in enumerate(self.heatmap):
+                        for _x, heat in enumerate(_line):
+                            self.heatmap[_y][_x] += 100 - ((x - _x) ** 2 + abs(y - _y) ** 2) ** 0.5
+                    yield from asyncio.sleep(0.01)
 
     def handle_WHOAMI(self, data):
         self.position = (round(data[3] / 10), round(data[2] / 10))
