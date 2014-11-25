@@ -67,16 +67,15 @@ class Pathfinder:
         x, y = pos
         return 0 <= y < len(self.map) and 0 <= x < len(self.map[y])
 
-    def get_tile_info(self, pos, info=None, direction=None):
+    def get_tile_info(self, info):
+        (nd, nmint, nmaxt, path, pos) = info
         bombscore = self._get_bomb_score(pos)
-        min_hide_distance, hide_path = self._get_min_hide_distance(pos)
-        (nd, nmint, nmaxt, path) = self.distance_counter(pos, info, direction)
-        ninfo = (nd, nmint, nmaxt, path, bombscore, min_hide_distance, hide_path)
-        return ninfo
+        for min_hide_distance, hide_path, endpos in self._get_min_hide_distance(pos):
+            yield (nd, nmint, nmaxt, path, pos, bombscore, min_hide_distance, hide_path, endpos)
 
     def distance_counter(self, pos, info=None, direction=None):
         if info is None:
-            return (0, 0., 0., [])
+            return (0, 0., 0., [], pos)
         nd = info[0] + 1
         nmint = info[1] + 0.1
         nmaxt = info[2] + 0.2
@@ -85,7 +84,7 @@ class Pathfinder:
             path = info[3][:]
             if direction:
                 path.append(direction)
-        ninfo = (nd, nmint, nmaxt, path)
+        ninfo = (nd, nmint, nmaxt, path, pos)
         return ninfo
 
     def _get_bomb_score(self, pos, distance=10):
@@ -107,16 +106,18 @@ class Pathfinder:
                     break
         return score
 
-    def _get_min_hide_distance(self, pos):
-        nb_tiles = self.get_neighbour_tiles(walkable=True, start_position=pos, additional_info=self.distance_counter)
+    def _get_min_hide_distance(self, pos, max_tiles=16):
+        nb_tiles = self.get_neighbour_tiles(walkable=True, start_position=pos)
         distance = 100000
         path = []
         for npos, info in nb_tiles:
             if self._is_safe(npos, additional_bombs=[Bomb(pos, now())]):
                 distance = info[0]
                 path = info[3][:]
-                break
-        return distance, path
+                yield distance, path, npos
+                max_tiles -= 1
+                if max_tiles == 0:
+                    break
 
     def _is_safe(self, pos, time_info=None, additional_bombs=None, distance=10):
         bombs = self.known_bombs[:]
@@ -152,18 +153,16 @@ class Pathfinder:
                         return False
         return True
 
-    def get_neighbour_tiles(self, walkable=False, start_position=None, additional_info=None):
+    def get_neighbour_tiles(self, walkable=False, start_position=None, additional_bombs=None):
         if start_position is None:
             start_position = self.position
-        if additional_info is None:
-            additional_info = self.get_tile_info
         visited = set([])
-        to_visit = [(start_position, additional_info(start_position))]
+        to_visit = [(start_position, self.distance_counter(start_position))]
         while to_visit:
             pos, info = to_visit.pop(0)
             x, y = pos
             visited.add(pos)
-            if not self._is_safe(pos, (info[1], info[2])):
+            if not self._is_safe(pos, (info[1], info[2]), additional_bombs=additional_bombs):
                 continue
             yield pos, info
 
@@ -178,20 +177,40 @@ class Pathfinder:
                     continue
                 if walkable and not tile.islower():
                     continue
-                ninfo = additional_info(npos, info, direction)
+                ninfo = self.distance_counter(npos, info, direction)
                 to_visit.append((npos, ninfo))
 
+    def get_bomb_and_hide_paths(self):
+        paths = self.get_neighbour_tiles(walkable=True)
+        for _, info in paths:
+            yield from self.get_tile_info(info)
+
+    def _score_endpos(self, endpos, bombpos, max_depth=15):
+        return 0
+        additional_bombs = [Bomb(bombpos, now())]
+        bombscore = 0
+        for pos, info in self.get_neighbour_tiles(
+                start_position=endpos,
+                walkable=True,
+                additional_bombs=additional_bombs
+                ):
+            if info[0] > max_depth:
+                break
+            bombscore += self._get_bomb_score(pos)
+        return bombscore
+
     def get_best_move(self, max_depth=15):
-        def score(distance, mint, maxt, path, score, hide_distance, hide_path):
+        def score(distance, mint, maxt, path, bombpos, score, hide_distance, hide_path, endpos):
+            # score, hide_distance, hide_path, endpos = self.get_tile_info((distance, mint, maxt, path, bombpos))
             if hide_path:
-                return (score * 10) - maxt - (hide_distance * 0.2)
+                return (score * 10) - maxt - (hide_distance * 0.2) + self._score_endpos(endpos, bombpos)
             return (score * 10) - maxt - (hide_distance * 0.2) - 100000
 
-        paths = self.get_neighbour_tiles(walkable=True)
-        _, info = next(paths)
+        paths = self.get_bomb_and_hide_paths()
+        info = next(paths)
         best_score = score(*info)
         best_info = info
-        for _, info in paths:
+        for info in paths:
             if info[0] > max_depth:
                 break
             _score = score(*info)
@@ -408,7 +427,7 @@ class HWM(NetworkClient):
             try:
                 info = self.get_best_move()
                 path = info[3]
-                hide_path = info[6]
+                hide_path = info[7]
                 if not hide_path:
                     return
                 logger.debug("go, {} b {}".format(path, hide_path))
