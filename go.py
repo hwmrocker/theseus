@@ -106,7 +106,7 @@ class Pathfinder:
                     break
         return score
 
-    def _get_min_hide_distance(self, pos, max_tiles=16):
+    def _get_min_hide_distance(self, pos, max_tiles=8):
         nb_tiles = self.get_neighbour_tiles(walkable=True, start_position=pos)
         distance = 100000
         path = []
@@ -185,8 +185,8 @@ class Pathfinder:
         for _, info in paths:
             yield from self.get_tile_info(info)
 
-    def _score_endpos(self, endpos, bombpos, max_depth=15):
-        return 0
+    def _score_endpos(self, endpos, bombpos, max_depth=3):
+        # return 0
         additional_bombs = [Bomb(bombpos, now())]
         bombscore = 0
         for pos, info in self.get_neighbour_tiles(
