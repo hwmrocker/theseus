@@ -452,7 +452,7 @@ class HWM(NetworkClient):
         loop.call_later(0.25, self.update_bombs)
 
     def connection_established(self):
-        self.send_msg(dict(type="connect", username="Theseus by hwm"))
+        self.send_msg(dict(type="connect", username="Theseus", password="streng geheim"))
         self.send_msg(dict(type="whoami"))
         self.send_msg(dict(type="map"))
 
