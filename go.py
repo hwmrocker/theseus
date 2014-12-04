@@ -376,10 +376,12 @@ class HWM(NetworkClient):
         return self._known_bombs[idx]
 
     def add_bomb(self, pos, fuse_time):
+        logger.debug("add_bomb {}".format(pos))
         idx = "|".join(map(str, pos))
         self._known_bombs[idx] = Bomb(pos, fuse_time)
 
     def delete_bomb(self, pos, walls=None):
+        logger.debug("delete_bomb {}".format(pos))
         idx = "|".join(map(str, pos))
         if idx in self._known_bombs:
             del self._known_bombs[idx]
@@ -391,6 +393,7 @@ class HWM(NetworkClient):
             b.update(self.map)
 
     def set_fire_trails(self, pos, fire_trails, fuse_time=None):
+        logger.debug("set_fire_trails {}".format(pos))
         idx = "|".join(map(str, pos))
         if not self._known_bombs[idx]:
             self.add_bomb(pos, fuse_time)
