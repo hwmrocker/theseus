@@ -299,7 +299,7 @@ class NetworkClient(Pathfinder):
 
 class HWM(NetworkClient):
 
-    def __init__(self, *args, **kw):
+    def __init__(self, name="HWM", password="geheim", *args, **kw):
         super().__init__(*args, **kw)
         self.map = []
         self._ignore_list = []  # ignores unknown callbacks
@@ -308,6 +308,8 @@ class HWM(NetworkClient):
         self.position_data_consistent = False
         self.ai_running = False
         self.alive = False
+        self.name = name
+        self.password = password
         loop.call_later(1, self.update_bombs)
 
     @property
@@ -318,7 +320,7 @@ class HWM(NetworkClient):
     def known_bombs(self, value):
         # if there is a bomb missing or fuse_time more than a second later
         # we need to check the mapdata again
-        logger.error("old {} | new {}".format(self._known_bombs, value))
+        logger.debug("old {} | new {}".format(self._known_bombs, value))
         for b in self._known_bombs:
             found_match = False
             for _b in value:
@@ -349,7 +351,7 @@ class HWM(NetworkClient):
         except AttributeError:
             if msg_type not in self._ignore_list:
                 self._ignore_list.append(msg_type)
-                logger.debug("No handler for {}".format(msg_type))
+                logger.error("No handler for {}".format(msg_type))
 
     def handle_MAP(self, mapstr):
         self.map = []
@@ -380,7 +382,7 @@ class HWM(NetworkClient):
         timed = now()
         new_bombs = []
         for pos, fuse_time, state in data:
-            logger.error(data)
+            logger.debug(data)
             if state == "ticking":
                 fuse_time = fuse_time + timed
             elif state == "burning":
@@ -389,6 +391,9 @@ class HWM(NetworkClient):
                 fuse_time = fuse_time + timed - 0.2
             new_bombs.append(Bomb(pos, fuse_time))
         self.known_bombs = new_bombs
+
+    def handle_BOMB(self, data):
+        print(data)
 
     def handle_ERR(self, data):
         logger.error(data)
@@ -452,7 +457,7 @@ class HWM(NetworkClient):
         loop.call_later(0.25, self.update_bombs)
 
     def connection_established(self):
-        self.send_msg(dict(type="connect", username="Theseus by hwm"))
+        self.send_msg(dict(type="connect", username=self.name, password=self.password, async=True))
         self.send_msg(dict(type="whoami"))
         self.send_msg(dict(type="map"))
 
@@ -493,8 +498,18 @@ class HWM(NetworkClient):
 
 
 if __name__ == "__main__":
+    import sys
+    name = "Theseus"
+    password = None
+    if len(sys.argv) == 2:
+        name = sys.argv[1]
+    elif len(sys.argv) == 3:
+        name = sys.argv[1]
+        password = sys.argv[2]
+    # print(sys.argv)
+    # sys.exit(0)
     loop = asyncio.get_event_loop()
-    c = HWM()
+    c = HWM(name=name, password=password)
     asyncio.async(c.connect())
     loop.add_reader(sys.stdin, c.read_stdin)
     try:
