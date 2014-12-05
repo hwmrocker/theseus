@@ -389,8 +389,11 @@ class HWM(NetworkClient):
         for pos in walls:
             x, y = pos
             self.map[y][x] = "g"
+
         for b in self.known_bombs:
-            b.update(self.map)
+            b.update(self)
+
+        asyncio.async(self.update_ai())
 
     def set_fire_trails(self, pos, fire_trails, fuse_time=None):
         logger.debug("set_fire_trails {}".format(pos))
@@ -401,7 +404,6 @@ class HWM(NetworkClient):
 
     @property
     def data_consitent(self):
-        print("m{} p{}".format(self.map_data_consistent, self.position_data_consistent))
         return self.map_data_consistent and self.position_data_consistent
 
     def inform(self, msg_type, data):
@@ -446,23 +448,15 @@ class HWM(NetworkClient):
     def handle_BOMB(self, data):
         timed = now()
         new_bombs = []
-        try:
-            from_id, pos, fuse_time, state, extra = data
-        except ValueError:
-            print(repr(data))
-            import sys
-            sys.exit(0)
+        from_id, pos, fuse_time, state, extra = data
         logger.debug(data)
         if state == "ticking":
             self.add_bomb(pos, fuse_time + timed)
         elif state == "burning":
-            # fuse_time = fuse_time + timed - 1.7
             bomb = self.get_or_create_bomb(pos, fuse_time + timed - 1.7)
             bomb.update_fire_trails(extra)
         elif state == "hiding":
             self.delete_bomb(pos, extra)
-        # new_bombs.append()
-        # self.known_bombs = new_bombs
 
     def handle_ERR(self, data):
         logger.error(data)
@@ -556,7 +550,7 @@ class HWM(NetworkClient):
                 asyncio.async(self.update_ai())
         else:
             yield from asyncio.sleep(0.5)
-            asyncio.async(self.update_ai())
+            # asyncio.async(self.update_ai())
 
     def update_internal_state(self):
         self.send_msg(dict(type="whoami"))
