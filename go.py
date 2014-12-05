@@ -45,6 +45,7 @@ class Bomb(_Bomb):
     # def __init__(self, *args, **kw):
     #     super().__init__(*args, **kw)
     need_update = True
+    final = False
     distance = 10
 
     def is_safe(self, pos, time_info, world):
@@ -56,20 +57,49 @@ class Bomb(_Bomb):
             self.update(world)
         if self.position == pos:
             return False
-        for direction, danger_zone in self.danger_zones.items():
+        for danger_zone in self.danger_zones:
             if pos in danger_zone:
                 return False
         return True
 
+    def update_fire_trails(self, fire_trails):
+        self.need_update = False
+        self.danger_zones = []
+        for end_pos in fire_trails:
+            fire_trail = []
+            x, y = end_pos
+            bx, by = self.position
+            if x == bx:
+                if y > by:
+                    y_list = range(y, by, -1)
+                else:
+                    y_list = range(y+1, by+1)
+                for by in y_list:
+                    fire_trail.append((bx, by))
+            elif y == by:
+                if x > bx:
+                    x_list = range(x, bx, -1)
+                else:
+                    x_list = range(x+1, bx+1)
+
+                for bx in x_list:
+                    fire_trail.append((bx, by))
+            else:
+                raise "Firetrails can only grow on x, or y axis"
+            self.danger_zones.append(fire_trail)
+        self.final = True
+
     def update(self, world):
-        self.danger_zones = {
-            "w": [],
-            "a": [],
-            "s": [],
-            "d": [],
-        }
-        x, y = self.position
+        if self.final:
+            return
+        self.danger_zones = []
+        try:
+            x, y = self.position
+        except ValueError:
+            print(repr(self.position))
+            raise
         for direction, (dx, dy) in directions.items():
+            fire_trail = []
             for i in range(1, self.distance + 1):
                 nx = x + i * dx
                 ny = y + i * dy
@@ -82,7 +112,8 @@ class Bomb(_Bomb):
                     break
                 elif tile == "M":
                     break
-                self.danger_zones[direction].append(npos)
+                fire_trail.append(npos)
+            self.danger_zones.append(fire_trail)
         self.need_update = False
         # logger.error(self.danger_zones)
 
@@ -225,7 +256,7 @@ class Pathfinder:
                 break
             bombscore += self._get_bomb_score(pos)
         x, y = endpos
-        return bombscore + self.heatmap[y][x]
+        return bombscore #+ self.heatmap[y][x]
 
     def get_best_move(self, max_depth=15):
         def score(distance, mint, maxt, path, bombpos, score, hide_distance, hide_path, endpos):
@@ -299,26 +330,28 @@ class NetworkClient(Pathfinder):
 
 class HWM(NetworkClient):
 
-    def __init__(self, *args, **kw):
+    def __init__(self, name="HWM", password="geheim", *args, **kw):
         super().__init__(*args, **kw)
         self.map = []
         self._ignore_list = []  # ignores unknown callbacks
-        self._known_bombs = []
+        self._known_bombs = {}
         self.map_data_consistent = False
         self.position_data_consistent = False
         self.ai_running = False
         self.alive = False
+        self.name = name
+        self.password = password
         loop.call_later(1, self.update_bombs)
 
     @property
     def known_bombs(self):
-        return self._known_bombs
+        return list(self._known_bombs.values())
 
     @known_bombs.setter
     def known_bombs(self, value):
+        return
         # if there is a bomb missing or fuse_time more than a second later
         # we need to check the mapdata again
-        logger.error("old {} | new {}".format(self._known_bombs, value))
         for b in self._known_bombs:
             found_match = False
             for _b in value:
@@ -334,6 +367,41 @@ class HWM(NetworkClient):
                 break
         self._known_bombs = value
 
+    def get_or_create_bomb(self, pos, fuse_time):
+        idx = "|".join(map(str, pos))
+        try:
+            return self._known_bombs[idx]
+        except:
+            self._known_bombs[idx] = Bomb(pos, fuse_time)
+        return self._known_bombs[idx]
+
+    def add_bomb(self, pos, fuse_time):
+        logger.debug("add_bomb {}".format(pos))
+        idx = "|".join(map(str, pos))
+        self._known_bombs[idx] = Bomb(pos, fuse_time)
+
+    def delete_bomb(self, pos, walls=None):
+        logger.debug("delete_bomb {}".format(pos))
+        idx = "|".join(map(str, pos))
+        if idx in self._known_bombs:
+            del self._known_bombs[idx]
+
+        for pos in walls:
+            x, y = pos
+            self.map[y][x] = "g"
+
+        for b in self.known_bombs:
+            b.update(self)
+
+        asyncio.async(self.update_ai())
+
+    def set_fire_trails(self, pos, fire_trails, fuse_time=None):
+        logger.debug("set_fire_trails {}".format(pos))
+        idx = "|".join(map(str, pos))
+        if not self._known_bombs[idx]:
+            self.add_bomb(pos, fuse_time)
+        self._known_bombs[idx].set_fire_trails(fire_trails)
+
     @property
     def data_consitent(self):
         return self.map_data_consistent and self.position_data_consistent
@@ -341,15 +409,16 @@ class HWM(NetworkClient):
     def inform(self, msg_type, data):
         if msg_type != "ERR":
             self.alive = True
-        try:
-            handler = getattr(self, "handle_{}".format(msg_type))
+        fn_name = "handle_{}".format(msg_type)
+        if hasattr(self, fn_name):
+            handler = getattr(self, fn_name)
             ret = handler(data)
             logger.debug("{}: {}".format(msg_type, ret))
 
-        except AttributeError:
+        else:
             if msg_type not in self._ignore_list:
                 self._ignore_list.append(msg_type)
-                logger.debug("No handler for {}".format(msg_type))
+                logger.error("No handler for {}".format(msg_type))
 
     def handle_MAP(self, mapstr):
         self.map = []
@@ -376,19 +445,18 @@ class HWM(NetworkClient):
         self.position_data_consistent = True
         asyncio.async(self.update_ai())
 
-    def handle_WHAT_BOMBS(self, data):
+    def handle_BOMB(self, data):
         timed = now()
         new_bombs = []
-        for pos, fuse_time, state in data:
-            logger.error(data)
-            if state == "ticking":
-                fuse_time = fuse_time + timed
-            elif state == "burning":
-                fuse_time = fuse_time + timed - 1.7
-            else:
-                fuse_time = fuse_time + timed - 0.2
-            new_bombs.append(Bomb(pos, fuse_time))
-        self.known_bombs = new_bombs
+        from_id, pos, fuse_time, state, extra = data
+        logger.debug(data)
+        if state == "ticking":
+            self.add_bomb(pos, fuse_time + timed)
+        elif state == "burning":
+            bomb = self.get_or_create_bomb(pos, fuse_time + timed - 1.7)
+            bomb.update_fire_trails(extra)
+        elif state == "hiding":
+            self.delete_bomb(pos, extra)
 
     def handle_ERR(self, data):
         logger.error(data)
@@ -444,15 +512,17 @@ class HWM(NetworkClient):
 
     def bomb(self, fuse_time):
         self.send_msg(dict(type="bomb", fuse_time=fuse_time))
-        self.known_bombs.append(Bomb(self.position, now()+fuse_time))
+        # self.known_bombs.append(Bomb(self.position, now()+fuse_time))
+        self.add_bomb(self.position, now()+fuse_time)
         loop = asyncio.get_event_loop()
 
     def update_bombs(self, delta=2):
-        self.send_msg(dict(type="what_bombs"))
-        loop.call_later(0.25, self.update_bombs)
+        # self.send_msg(dict(type="what_bombs"))
+        # loop.call_later(0.25, self.update_bombs)
+        pass
 
     def connection_established(self):
-        self.send_msg(dict(type="connect", username="Theseus", password="streng geheim"))
+        self.send_msg(dict(type="connect", username=self.name, password=self.password, async=True))
         self.send_msg(dict(type="whoami"))
         self.send_msg(dict(type="map"))
 
@@ -478,10 +548,13 @@ class HWM(NetworkClient):
                 self.ai_running = False
                 yield from asyncio.sleep(0.5)
                 asyncio.async(self.update_ai())
+        else:
+            yield from asyncio.sleep(0.5)
+            # asyncio.async(self.update_ai())
 
     def update_internal_state(self):
         self.send_msg(dict(type="whoami"))
-        self.send_msg(dict(type="map"))
+        # self.send_msg(dict(type="map"))
         # yield from asyncio.sleep(2)
 
     @asyncio.coroutine
@@ -493,8 +566,18 @@ class HWM(NetworkClient):
 
 
 if __name__ == "__main__":
+    import sys
+    name = "Theseus"
+    password = None
+    if len(sys.argv) == 2:
+        name = sys.argv[1]
+    elif len(sys.argv) == 3:
+        name = sys.argv[1]
+        password = sys.argv[2]
+    # print(sys.argv)
+    # sys.exit(0)
     loop = asyncio.get_event_loop()
-    c = HWM()
+    c = HWM(name=name, password=password)
     asyncio.async(c.connect())
     loop.add_reader(sys.stdin, c.read_stdin)
     try:
